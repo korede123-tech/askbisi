@@ -4,23 +4,26 @@
   "type": "module",
   "main": "brain.js",
   "scripts": {
-    "start": "npm run build && node server/server.js",
-    "dev": "concurrently -k \"node --watch server/server.js\" \"vite\"",
-    "build": "vite build"
+    "start": "node server/server.js",
+    "dev": "node --watch server/server.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@livekit/protocol": "^1.53.4",
+    "axios": "^1.11.0",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
-    "livekit-client": "^2.23.0",
-    "livekit-server-sdk": "^2.19.2"
-  },
-  "devDependencies": {
-    "concurrently": "^9.2.1",
-    "vite": "^8.3.6"
+    "express-list-endpoints": "^7.1.1",
+    "formdata-node": "^6.0.3",
+    "fs": "^0.0.1-security",
+    "mic": "^2.1.2",
+    "multer": "^2.0.2",
+    "node-fetch": "^2.7.0",
+    "node-record-lpcm16": "^1.0.1",
+    "openai": "^3.2.1",
+    "path": "^0.12.7",
+    "play-sound": "^1.1.6"
   }
 }
