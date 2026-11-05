@@ -2,170 +2,75 @@ import express from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
-import multer from 'multer';
+import { randomUUID } from 'crypto';
+import { AccessToken } from 'livekit-server-sdk';
+import { RoomAgentDispatch, RoomConfiguration } from '@livekit/protocol';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..');
+const staticRoot = path.join(projectRoot, 'dist');
 
 dotenv.config({ path: path.join(projectRoot, '.env') });
 
 const app = express();
-const upload = multer({ storage: multer.memoryStorage() });
 const port = Number(process.env.PORT || 3000);
-
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
 
 app.get('/health', (_req, res) => {
   res.json({ ok: true, message: 'Bisi voice app is running.' });
 });
 
-app.post('/api/chat', async (req, res) => {
-  const prompt = req.body?.prompt?.trim();
-  if (!prompt) {
-    return res.status(400).json({ error: 'A prompt is required.' });
-  }
-
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({
-      error: 'OpenAI API key is not configured. Add OPENAI_API_KEY to your .env file.',
+app.post('/api/livekit/token', async (_req, res) => {
+  const livekitUrl = process.env.LIVEKIT_URL;
+  const apiKey = process.env.LIVEKIT_API_KEY;
+  const apiSecret = process.env.LIVEKIT_API_SECRET;
+  if (!livekitUrl || !apiKey || !apiSecret) {
+    return res.status(503).json({
+      error: 'LiveKit is not configured. Set LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET.',
     });
   }
 
   try {
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-        max_completion_tokens: 128,
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You are Bisi Silva, a multilingual Nigerian curator and artist reimagined as an AI. Detect the user\'s language and reply in the same tone and language. Keep replies under 60 words.',
-          },
-          { role: 'user', content: prompt },
-        ],
-      }),
+    const roomName = `ask-bisi-${randomUUID()}`;
+    const identity = `guest-${randomUUID()}`;
+    const accessToken = new AccessToken(apiKey, apiSecret, {
+      identity,
+      name: 'Guest',
+      ttl: '10m',
+    });
+    accessToken.addGrant({
+      roomJoin: true,
+      room: roomName,
+      canPublish: true,
+      canSubscribe: true,
+      canPublishData: true,
+    });
+    accessToken.roomConfig = new RoomConfiguration({
+      agents: [
+        new RoomAgentDispatch({
+          agentName: process.env.LIVEKIT_AGENT_NAME || 'bisi-voice-agent',
+        }),
+      ],
     });
 
-    const data = await response.json();
-    if (!response.ok) {
-      return res.status(response.status).json({
-        error: data?.error?.message || 'OpenAI chat request failed.',
-      });
-    }
-
-    const reply = data.choices?.[0]?.message?.content?.trim() || 'Sorry, I didn’t catch that.';
-    return res.json({ reply });
+    return res.status(201).json({
+      server_url: livekitUrl,
+      participant_token: await accessToken.toJwt(),
+    });
   } catch (error) {
-    console.error('Chat API error:', error);
-    return res.status(500).json({ error: 'Unable to generate a chat response.' });
+    console.error('LiveKit token error:', error);
+    return res.status(500).json({ error: 'Unable to start a LiveKit voice session.' });
   }
 });
 
-app.post('/api/transcribe', upload.single('file'), async (req, res) => {
-  const file = req.file;
-  if (!file) {
-    return res.status(400).json({ error: 'No audio file uploaded.' });
-  }
-
-  const apiKey = process.env.ELEVENLABS_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({
-      error: 'ElevenLabs API key is not configured. Add ELEVENLABS_API_KEY to your .env file.',
-    });
-  }
-
-  try {
-    const formData = new FormData();
-    formData.append(
-      'file',
-      new Blob([file.buffer], { type: file.mimetype || 'audio/wav' }),
-      file.originalname || 'speech.wav',
-    );
-    formData.append('model_id', 'scribe_v1');
-
-    const response = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
-      method: 'POST',
-      headers: { 'xi-api-key': apiKey },
-      body: formData,
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      return res.status(response.status).json({
-        error: data?.detail || 'Speech-to-text request failed.',
-      });
-    }
-
-    return res.json({ text: data.text || '' });
-  } catch (error) {
-    console.error('Transcription API error:', error);
-    return res.status(500).json({ error: 'Unable to transcribe the audio file.' });
-  }
+app.use('/api', (_req, res) => {
+  res.status(404).json({ error: 'API route not found.' });
 });
 
-app.post('/api/tts', async (req, res) => {
-  const text = req.body?.text?.trim();
-  if (!text) {
-    return res.status(400).json({ error: 'Text is required for speech synthesis.' });
-  }
+app.use(express.static(staticRoot));
 
-  const apiKey = process.env.ELEVENLABS_API_KEY;
-  const voiceId = process.env.ELEVENLABS_VOICE_ID || 'Z66ib1spzX3DsbiSJRZK';
-  if (!apiKey) {
-    return res.status(500).json({
-      error: 'ElevenLabs API key is not configured. Add ELEVENLABS_API_KEY to your .env file.',
-    });
-  }
-
-  try {
-    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
-      method: 'POST',
-      headers: {
-        'xi-api-key': apiKey,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        text,
-        model_id: process.env.ELEVENLABS_TTS_MODEL || 'eleven_flash_v2_5',
-        voice_settings: { stability: 0.4, similarity_boost: 0.9 },
-      }),
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => null);
-      const detail = errorData?.detail;
-      const message =
-        typeof detail === 'string'
-          ? detail
-          : detail?.message || errorData?.error || 'Text-to-speech request failed.';
-      return res.status(response.status).json({
-        error: message,
-        code: typeof detail === 'object' ? detail?.code : undefined,
-      });
-    }
-
-    const buffer = Buffer.from(await response.arrayBuffer());
-    res.setHeader('Content-Type', response.headers.get('content-type') || 'audio/mpeg');
-    return res.send(buffer);
-  } catch (error) {
-    console.error('TTS API error:', error);
-    return res.status(500).json({ error: 'Unable to generate speech.' });
-  }
-});
-
-app.use(express.static(projectRoot));
-
-app.use((req, res) => {
-  res.sendFile(path.join(projectRoot, 'index.html'));
+app.use((_req, res) => {
+  res.sendFile(path.join(staticRoot, 'index.html'));
 });
 
 export default app;

@@ -1,380 +1,168 @@
-const API_BASE = window.location.origin;
+import { Room, RoomEvent, Track, createLocalAudioTrack } from 'livekit-client';
 
-// === UI ELEMENTS ===
-const startBtn = document.getElementById("startBtn");
-const status = document.getElementById("status");
-const micWrapper = startBtn.closest(".mic-wrapper");
+const voiceButton = document.querySelector('#startBtn');
+const statusText = document.querySelector('#status');
+const glow = document.querySelector('.mic-wrapper');
 
-let keepListening = false;
-let audioCtx;
-let levelFrame;
-let stopActiveRecording;
-let cancelActiveAudio;
+let room;
+let microphoneTrack;
+let audioContext;
+let analyser;
+let animationFrame;
 
-const SPEECH_START_TIMEOUT_MS = 8000;
-const MAX_RECORDING_MS = 25000;
-const MAX_PLAYBACK_LISTEN_MS = 30000;
-const END_OF_SPEECH_SILENCE_MS = 1200;
-const MIN_SPEECH_MS = 100;
+function setStatus(message) {
+  if (statusText) statusText.textContent = message;
+}
 
-// === UNLOCK AUDIO CONTEXT (iOS & Android SAFE) ===
-document.addEventListener("touchstart", unlockAudioContext, { once: true });
-document.addEventListener("click", unlockAudioContext, { once: true });
+function setButtonState(state) {
+  if (!voiceButton) return;
+  voiceButton.dataset.state = state;
+  voiceButton.setAttribute('aria-label', {
+    idle: 'Start talking with Bisi',
+    connecting: 'Connecting to Bisi',
+    connected: 'End conversation with Bisi',
+  }[state]);
+  voiceButton.setAttribute('aria-pressed', String(state === 'connected'));
+  voiceButton.disabled = state === 'connecting';
+}
 
-// === START / STOP LOGIC ===
-startBtn.addEventListener("click", async () => {
-  if (keepListening) {
-    keepListening = false;
-    startBtn.setAttribute("aria-pressed", "false");
-    startBtn.setAttribute("aria-label", "Ask Bisi");
-    status.innerText = "🛑 Stopped listening.";
-    stopActiveRecording?.();
-    cancelActiveAudio?.();
-    return;
+function stopGlowMeter() {
+  cancelAnimationFrame(animationFrame);
+  analyser = undefined;
+  if (glow) {
+    glow.style.setProperty('--voice-glow-opacity', '0.2');
+    glow.style.setProperty('--voice-glow-scale', '1');
+    glow.style.setProperty('--voice-core-scale', '1');
   }
+}
 
-  keepListening = true;
-  startBtn.setAttribute("aria-pressed", "true");
-  startBtn.setAttribute("aria-label", "Stop listening");
-  await unlockAudioContext();
-  let pendingRecording;
+function startGlowMeter(track) {
+  const audioTrack = track.mediaStreamTrack;
+  if (!audioTrack || !glow) return;
 
-  while (keepListening) {
-    try {
-      status.innerText = pendingRecording ? "🎤 Listening to your interruption..." : "🎤 Listening... speak now";
-      const recording = pendingRecording || await recordAudio();
-      pendingRecording = undefined;
-      if (!keepListening) break;
-      if (!recording.heardSpeech) {
-        status.innerText = "I didn't catch clear speech. Try again.";
-        continue;
-      }
-      console.log("🎧 Recorded audioBlob:", recording.blob);
+  audioContext ??= new AudioContext();
+  if (audioContext.state === 'suspended') void audioContext.resume();
 
-      status.innerText = "Processing your speech...";
-      const userText = await transcribeAudio(recording.blob);
-      if (!userText || !keepListening) continue;
+  const source = audioContext.createMediaStreamSource(new MediaStream([audioTrack]));
+  analyser = audioContext.createAnalyser();
+  analyser.fftSize = 256;
+  source.connect(analyser);
 
-      if (/^\[[^\]]+\]$/.test(userText.trim())) {
-        status.innerText = "I heard background noise, not clear words. Try again.";
-        continue;
-      }
-
-      status.innerText = `You said: "${userText}"`;
-
-      const reply = await getChatResponse(userText);
-      if (!keepListening) continue;
-
-      status.innerText = `Bisi says: "${reply}"`;
-
-      const voiceBlob = await textToSpeech(reply);
-      if (voiceBlob && keepListening) {
-        pendingRecording = await playAudioAwaitable(voiceBlob);
-      }
-    } catch (err) {
-      console.error("🚨 Unexpected error:", err);
-      status.innerText = "❌ Something went wrong (see console).";
-      keepListening = false;
+  const samples = new Uint8Array(analyser.frequencyBinCount);
+  const updateLevel = () => {
+    if (!analyser) return;
+    analyser.getByteTimeDomainData(samples);
+    let sum = 0;
+    for (const sample of samples) {
+      const amplitude = (sample - 128) / 128;
+      sum += amplitude * amplitude;
     }
-  }
+    const level = Math.min(1, Math.sqrt(sum / samples.length) * 4);
+    glow.style.setProperty('--voice-glow-opacity', (0.2 + level * 0.75).toFixed(2));
+    glow.style.setProperty('--voice-glow-scale', (1 + level * 0.35).toFixed(2));
+    glow.style.setProperty('--voice-core-scale', (1 + level * 0.2).toFixed(2));
+    animationFrame = requestAnimationFrame(updateLevel);
+  };
+  updateLevel();
+}
 
-  startBtn.setAttribute("aria-pressed", "false");
-  startBtn.setAttribute("aria-label", "Ask Bisi");
-  stopVoiceGlow();
-});
+function cleanUpAudio() {
+  stopGlowMeter();
+  microphoneTrack?.stop();
+  microphoneTrack = undefined;
+  document.querySelectorAll('[data-livekit-audio]').forEach((audio) => audio.remove());
+}
 
-// === RECORD AUDIO ===
-async function recordAudio({ onReady, onSpeechStart, waitForSpeechMs = SPEECH_START_TIMEOUT_MS } = {}) {
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: {
+function attachRemoteAudio(track) {
+  if (track.kind !== Track.Kind.Audio) return;
+  const element = track.attach();
+  element.autoplay = true;
+  element.setAttribute('playsinline', '');
+  element.dataset.livekitAudio = 'true';
+  document.body.append(element);
+  void element.play().catch(() => {
+    setStatus('Bisi is ready. Tap the page to enable audio playback.');
+    const retryPlayback = () => {
+      void element.play().catch(() => {
+        setStatus('Audio playback is blocked. Check Safari’s site settings and try again.');
+      });
+    };
+    document.addEventListener('pointerdown', retryPlayback, { once: true });
+  });
+}
+
+async function endConversation() {
+  const activeRoom = room;
+  room = undefined;
+  if (activeRoom) await activeRoom.disconnect();
+  cleanUpAudio();
+  setButtonState('idle');
+  setStatus('Conversation ended.');
+}
+
+async function startConversation() {
+  setButtonState('connecting');
+  setStatus('Connecting securely…');
+
+  try {
+    audioContext ??= new AudioContext();
+    const audioResume = audioContext.resume().catch((error) => {
+      console.warn('Unable to resume the voice animation audio context:', error);
+    });
+    const microphonePromise = createLocalAudioTrack({
       echoCancellation: true,
       noiseSuppression: true,
       autoGainControl: true,
-    },
-  });
-  const analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 512;
-  analyser.smoothingTimeConstant = 0.75;
-  const microphone = audioCtx.createMediaStreamSource(stream);
-  microphone.connect(analyser);
-  startVoiceGlow(analyser);
-
-  const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-    ? "audio/webm;codecs=opus"
-    : MediaRecorder.isTypeSupported("audio/mp4")
-    ? "audio/mp4"
-    : "";
-
-  const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
-  const chunks = [];
-
-  return new Promise((resolve, reject) => {
-    const startedAt = Date.now();
-    const noiseSamples = [];
-    let speechStartedAt = 0;
-    let lastVoiceAt = 0;
-    let aboveThresholdAt = 0;
-    let voiceThreshold = 0.015;
-    let readyNotified = false;
-    let speechStartNotified = false;
-    let voiceCheck;
-
-    const stopRecording = () => {
-      if (voiceCheck) clearInterval(voiceCheck);
-      voiceCheck = undefined;
-      if (recorder.state !== "inactive") recorder.stop();
-    };
-
-    stopActiveRecording = stopRecording;
-    recorder.ondataavailable = (e) => chunks.push(e.data);
-    recorder.onstop = () => {
-      const blob = new Blob(chunks, { type: mimeType || "audio/webm" });
-      if (voiceCheck) clearInterval(voiceCheck);
-      stopActiveRecording = undefined;
-      stopVoiceGlow();
-      microphone.disconnect();
-      stream.getTracks().forEach((track) => track.stop());
-      resolve({ blob, heardSpeech: Boolean(speechStartedAt) });
-    };
-    recorder.onerror = (event) => {
-      if (voiceCheck) clearInterval(voiceCheck);
-      stopActiveRecording = undefined;
-      stopVoiceGlow();
-      microphone.disconnect();
-      stream.getTracks().forEach((track) => track.stop());
-      reject(event.error || new Error("Audio recording failed."));
-    };
-
-    recorder.start(250);
-    const samples = new Uint8Array(analyser.fftSize);
-    voiceCheck = setInterval(() => {
-      const now = Date.now();
-      const elapsed = now - startedAt;
-      analyser.getByteTimeDomainData(samples);
-      let sumOfSquares = 0;
-
-      for (const sample of samples) {
-        const amplitude = (sample - 128) / 128;
-        sumOfSquares += amplitude * amplitude;
+    }).then((track) => {
+      microphoneTrack = track;
+      return track;
+    });
+    const tokenPromise = fetch('/api/livekit/token', { method: 'POST' }).then(async (response) => {
+      const tokenData = await response.json();
+      if (!response.ok) {
+        throw new Error(tokenData.error || 'Unable to start a voice session.');
       }
+      return tokenData;
+    });
+    const [tokenData, track] = await Promise.all([tokenPromise, microphonePromise]);
 
-      const volume = Math.sqrt(sumOfSquares / samples.length);
-      if (elapsed < 350) {
-        noiseSamples.push(volume);
-        if (noiseSamples.length === 5) {
-          noiseSamples.sort((a, b) => a - b);
-          voiceThreshold = Math.max(0.012, Math.min(0.035, noiseSamples[1] * 2.5));
-        }
-      } else {
-        if (!readyNotified) {
-          readyNotified = true;
-          onReady?.();
-        }
-
-        if (volume >= voiceThreshold) {
-          if (!aboveThresholdAt) aboveThresholdAt = now;
-          if (!speechStartedAt && now - aboveThresholdAt >= MIN_SPEECH_MS) {
-            speechStartedAt = aboveThresholdAt;
-          }
-          if (speechStartedAt) {
-            lastVoiceAt = now;
-            if (!speechStartNotified) {
-              speechStartNotified = true;
-              onSpeechStart?.();
-            }
-          }
-        } else {
-          aboveThresholdAt = 0;
-        }
-      }
-
-      if (
-        (speechStartedAt && now - lastVoiceAt >= END_OF_SPEECH_SILENCE_MS) ||
-        (!speechStartedAt && elapsed >= waitForSpeechMs) ||
-        elapsed >= MAX_RECORDING_MS
-      ) {
-        stopRecording();
-      }
-    }, 50);
-  });
-}
-
-function startVoiceGlow(analyser) {
-  const samples = new Uint8Array(analyser.fftSize);
-  micWrapper.classList.add("is-listening");
-
-  const updateGlow = () => {
-    analyser.getByteTimeDomainData(samples);
-    let sumOfSquares = 0;
-
-    for (const sample of samples) {
-      const amplitude = (sample - 128) / 128;
-      sumOfSquares += amplitude * amplitude;
-    }
-
-    const volume = Math.sqrt(sumOfSquares / samples.length);
-    const voiceLevel = Math.min(1, Math.max(0, (volume - 0.015) * 7));
-    micWrapper.style.setProperty("--voice-glow-opacity", `${0.12 + voiceLevel * 0.88}`);
-    micWrapper.style.setProperty("--voice-glow-scale", `${1.02 + voiceLevel * 0.42}`);
-    micWrapper.style.setProperty("--voice-core-scale", `${1 + voiceLevel * 0.16}`);
-    levelFrame = requestAnimationFrame(updateGlow);
-  };
-
-  updateGlow();
-}
-
-function stopVoiceGlow() {
-  if (levelFrame) cancelAnimationFrame(levelFrame);
-  levelFrame = undefined;
-  micWrapper.classList.remove("is-listening");
-  micWrapper.style.setProperty("--voice-glow-opacity", "0.2");
-  micWrapper.style.setProperty("--voice-glow-scale", "1");
-  micWrapper.style.setProperty("--voice-core-scale", "1");
-}
-
-// === SPEECH-TO-TEXT ===
-async function transcribeAudio(audioBlob) {
-  try {
-    const formData = new FormData();
-    const extension = audioBlob.type.includes("mp4")
-      ? "mp4"
-      : audioBlob.type.includes("webm")
-      ? "webm"
-      : "audio";
-    formData.append("file", audioBlob, `speech.${extension}`);
-
-    const response = await fetch(`${API_BASE}/api/transcribe`, {
-      method: "POST",
-      body: formData,
+    const activeRoom = new Room({ adaptiveStream: true, dynacast: true });
+    room = activeRoom;
+    activeRoom.on(RoomEvent.TrackSubscribed, (track) => attachRemoteAudio(track));
+    activeRoom.on(RoomEvent.TrackUnsubscribed, (track) => track.detach().forEach((element) => element.remove()));
+    activeRoom.on(RoomEvent.Disconnected, () => {
+      if (room !== activeRoom) return;
+      room = undefined;
+      cleanUpAudio();
+      setButtonState('idle');
+      setStatus('Connection ended.');
     });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error("🛑 Transcription failed:", errText);
-      return null;
-    }
+    microphoneTrack = track;
+    await audioResume;
+    startGlowMeter(microphoneTrack);
+    await activeRoom.connect(tokenData.server_url, tokenData.participant_token);
+    await activeRoom.localParticipant.publishTrack(microphoneTrack);
 
-    const result = await response.json();
-    console.log("📜 Transcription:", result);
-    return result.text || "";
-  } catch (err) {
-    console.error("Transcription error:", err);
-    return null;
+    setButtonState('connected');
+    setStatus('You’re connected. Speak naturally — you can interrupt Bisi anytime.');
+  } catch (error) {
+    console.error('Unable to start voice conversation:', error);
+    const activeRoom = room;
+    room = undefined;
+    if (activeRoom) await activeRoom.disconnect();
+    cleanUpAudio();
+    setButtonState('idle');
+    setStatus(error instanceof Error ? error.message : 'Unable to connect. Please try again.');
   }
 }
 
-// === OPENAI CHAT ===
-async function getChatResponse(prompt) {
-  try {
-    const response = await fetch(`${API_BASE}/api/chat`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ prompt }),
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      console.error("Chat API error:", data);
-      return "Chat service failed.";
-    }
-
-    const reply = data.reply || "Sorry, I didn’t catch that.";
-    console.log("🧠 Bisi's Reply:", reply);
-    return reply;
-  } catch (err) {
-    console.error("Chat error:", err);
-    return "Something went wrong.";
+voiceButton?.addEventListener('click', () => {
+  if (room) {
+    void endConversation();
+  } else {
+    void startConversation();
   }
-}
+});
 
-// === ELEVENLABS TTS ===
-async function textToSpeech(text) {
-  try {
-    const response = await fetch(`${API_BASE}/api/tts`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ text }),
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      const message = errorData.error || "Text-to-speech request failed.";
-      console.error("🛑 TTS failed:", message, errorData.code || "");
-      status.innerText = message;
-      return null;
-    }
-
-    return await response.blob();
-  } catch (err) {
-    console.error("TTS error:", err);
-    return null;
-  }
-}
-
-// === PLAY AUDIO ===
-async function playAudioAwaitable(blob) {
-  await unlockAudioContext();
-  const audioUrl = URL.createObjectURL(blob);
-  const audio = new Audio(audioUrl);
-  let finishAudio;
-  const audioFinished = new Promise((resolve) => {
-    finishAudio = resolve;
-  });
-
-  audio.onended = () => finishAudio("ended");
-  audio.onerror = () => finishAudio("error");
-  const recordingPromise = recordAudio({
-    waitForSpeechMs: MAX_PLAYBACK_LISTEN_MS,
-    onReady: () => {
-      if (keepListening) {
-        audio.play().catch((error) => {
-          console.warn("Playback error:", error);
-          finishAudio("error");
-        });
-      } else {
-        finishAudio("cancelled");
-      }
-    },
-    onSpeechStart: () => {
-      status.innerText = "I hear you—go ahead.";
-      audio.pause();
-    },
-  });
-
-  cancelActiveAudio = () => {
-    audio.pause();
-    finishAudio("cancelled");
-    stopActiveRecording?.();
-  };
-
-  try {
-    const outcome = await Promise.race([
-      recordingPromise.then((recording) => ({ type: "recording", recording })),
-      audioFinished.then((type) => ({ type })),
-    ]);
-
-    if (outcome.type !== "recording") {
-      stopActiveRecording?.();
-      await recordingPromise;
-      return null;
-    }
-
-    return outcome.recording.heardSpeech ? outcome.recording : null;
-  } finally {
-    cancelActiveAudio = undefined;
-    audio.pause();
-    audio.onended = null;
-    audio.onerror = null;
-    URL.revokeObjectURL(audioUrl);
-  }
-}
-
-// === UNLOCK CONTEXT ===
-async function unlockAudioContext() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  if (audioCtx.state === "suspended") await audioCtx.resume();
-}
+setButtonState('idle');
