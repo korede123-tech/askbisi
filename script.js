@@ -14,7 +14,7 @@ let cancelActiveAudio;
 const SPEECH_START_TIMEOUT_MS = 8000;
 const MAX_RECORDING_MS = 25000;
 const MAX_PLAYBACK_LISTEN_MS = 30000;
-const END_OF_SPEECH_SILENCE_MS = 1200;
+const END_OF_SPEECH_SILENCE_MS = 800;
 const MIN_SPEECH_MS = 100;
 
 // === UNLOCK AUDIO CONTEXT (iOS & Android SAFE) ===
@@ -36,7 +36,16 @@ startBtn.addEventListener("click", async () => {
   keepListening = true;
   startBtn.setAttribute("aria-pressed", "true");
   startBtn.setAttribute("aria-label", "Stop listening");
-  await unlockAudioContext();
+  try {
+    await unlockAudioContext();
+  } catch (err) {
+    console.error("Audio initialization failed:", err);
+    keepListening = false;
+    startBtn.setAttribute("aria-pressed", "false");
+    startBtn.setAttribute("aria-label", "Ask Bisi");
+    status.innerText = "Audio could not start. Tap to try again.";
+    return;
+  }
   let pendingRecording;
 
   while (keepListening) {
@@ -73,7 +82,7 @@ startBtn.addEventListener("click", async () => {
       }
     } catch (err) {
       console.error("🚨 Unexpected error:", err);
-      status.innerText = "❌ Something went wrong (see console).";
+      status.innerText = getMicrophoneErrorMessage(err);
       keepListening = false;
     }
   }
@@ -85,6 +94,13 @@ startBtn.addEventListener("click", async () => {
 
 // === RECORD AUDIO ===
 async function recordAudio({ onReady, onSpeechStart, waitForSpeechMs = SPEECH_START_TIMEOUT_MS } = {}) {
+  if (!window.isSecureContext) {
+    throw new Error("Microphone access requires HTTPS. Open Ask Bisi using its secure website address.");
+  }
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    throw new Error("This browser cannot record audio. Please use the latest version of Safari.");
+  }
+
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
       echoCancellation: true,
@@ -92,20 +108,30 @@ async function recordAudio({ onReady, onSpeechStart, waitForSpeechMs = SPEECH_ST
       autoGainControl: true,
     },
   });
-  const analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 512;
-  analyser.smoothingTimeConstant = 0.75;
-  const microphone = audioCtx.createMediaStreamSource(stream);
-  microphone.connect(analyser);
-  startVoiceGlow(analyser);
+  let analyser;
+  let microphone;
+  let recorder;
+  try {
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.75;
+    microphone = audioCtx.createMediaStreamSource(stream);
+    microphone.connect(analyser);
+    startVoiceGlow(analyser);
 
-  const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-    ? "audio/webm;codecs=opus"
-    : MediaRecorder.isTypeSupported("audio/mp4")
-    ? "audio/mp4"
-    : "";
-
-  const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+    const mimeType = [
+      "audio/mp4;codecs=mp4a.40.2",
+      "audio/mp4",
+      "audio/webm;codecs=opus",
+      "audio/webm",
+    ].find((type) => MediaRecorder.isTypeSupported?.(type));
+    recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+  } catch (error) {
+    stream.getTracks().forEach((track) => track.stop());
+    microphone?.disconnect();
+    stopVoiceGlow();
+    throw error;
+  }
   const chunks = [];
 
   return new Promise((resolve, reject) => {
@@ -128,7 +154,7 @@ async function recordAudio({ onReady, onSpeechStart, waitForSpeechMs = SPEECH_ST
     stopActiveRecording = stopRecording;
     recorder.ondataavailable = (e) => chunks.push(e.data);
     recorder.onstop = () => {
-      const blob = new Blob(chunks, { type: mimeType || "audio/webm" });
+      const blob = new Blob(chunks, { type: recorder.mimeType || "application/octet-stream" });
       if (voiceCheck) clearInterval(voiceCheck);
       stopActiveRecording = undefined;
       stopVoiceGlow();
@@ -145,7 +171,17 @@ async function recordAudio({ onReady, onSpeechStart, waitForSpeechMs = SPEECH_ST
       reject(event.error || new Error("Audio recording failed."));
     };
 
-    recorder.start(250);
+    try {
+      recorder.start(250);
+    } catch (error) {
+      if (voiceCheck) clearInterval(voiceCheck);
+      stopActiveRecording = undefined;
+      stopVoiceGlow();
+      microphone.disconnect();
+      stream.getTracks().forEach((track) => track.stop());
+      reject(error);
+      return;
+    }
     const samples = new Uint8Array(analyser.fftSize);
     voiceCheck = setInterval(() => {
       const now = Date.now();
@@ -197,6 +233,16 @@ async function recordAudio({ onReady, onSpeechStart, waitForSpeechMs = SPEECH_ST
       }
     }, 50);
   });
+}
+
+function getMicrophoneErrorMessage(error) {
+  if (error?.name === "NotAllowedError" || error?.name === "SecurityError") {
+    return "Microphone blocked. Allow microphone access for Ask Bisi in Safari settings, then try again.";
+  }
+  if (error?.name === "NotFoundError") {
+    return "No microphone was found. Check your device’s audio input and try again.";
+  }
+  return error instanceof Error ? error.message : "Something went wrong. Please try again.";
 }
 
 function startVoiceGlow(analyser) {
@@ -318,36 +364,59 @@ async function textToSpeech(text) {
 // === PLAY AUDIO ===
 async function playAudioAwaitable(blob) {
   await unlockAudioContext();
-  const audioUrl = URL.createObjectURL(blob);
-  const audio = new Audio(audioUrl);
-  let finishAudio;
+  const audioBuffer = await audioCtx.decodeAudioData(await blob.arrayBuffer());
+  let source;
+  let resolveAudioFinished;
   const audioFinished = new Promise((resolve) => {
-    finishAudio = resolve;
+    resolveAudioFinished = resolve;
   });
 
-  audio.onended = () => finishAudio("ended");
-  audio.onerror = () => finishAudio("error");
+  const stopPlayback = () => {
+    if (!source) return;
+    const activeSource = source;
+    source = undefined;
+    activeSource.onended = null;
+    activeSource.stop();
+    activeSource.disconnect();
+  };
+  const startPlayback = () => {
+    if (source || !keepListening) return;
+    source = audioCtx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(audioCtx.destination);
+    source.onended = () => {
+      const endedSource = source;
+      source = undefined;
+      endedSource?.disconnect();
+      resolveAudioFinished("ended");
+    };
+    source.start();
+  };
+
   const recordingPromise = recordAudio({
     waitForSpeechMs: MAX_PLAYBACK_LISTEN_MS,
     onReady: () => {
       if (keepListening) {
-        audio.play().catch((error) => {
-          console.warn("Playback error:", error);
-          finishAudio("error");
-        });
+        try {
+          startPlayback();
+        } catch (error) {
+          console.error("Playback error:", error);
+          status.innerText = "Bisi’s reply could not be played. Check your device volume and try again.";
+          resolveAudioFinished("error");
+        }
       } else {
-        finishAudio("cancelled");
+        resolveAudioFinished("cancelled");
       }
     },
     onSpeechStart: () => {
       status.innerText = "I hear you—go ahead.";
-      audio.pause();
+      stopPlayback();
     },
   });
 
   cancelActiveAudio = () => {
-    audio.pause();
-    finishAudio("cancelled");
+    stopPlayback();
+    resolveAudioFinished("cancelled");
     stopActiveRecording?.();
   };
 
@@ -366,10 +435,7 @@ async function playAudioAwaitable(blob) {
     return outcome.recording.heardSpeech ? outcome.recording : null;
   } finally {
     cancelActiveAudio = undefined;
-    audio.pause();
-    audio.onended = null;
-    audio.onerror = null;
-    URL.revokeObjectURL(audioUrl);
+    stopPlayback();
   }
 }
 

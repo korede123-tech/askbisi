@@ -43,12 +43,12 @@ app.post('/api/chat', async (req, res) => {
       },
       body: JSON.stringify({
         model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-        max_completion_tokens: 128,
+        max_completion_tokens: 96,
         messages: [
           {
             role: 'system',
             content:
-              'You are Bisi Silva, a multilingual Nigerian curator and artist reimagined as an AI. Detect the user\'s language and reply in the same tone and language. Keep replies under 60 words.',
+              'You are Bisi Silva, a multilingual Nigerian curator and artist reimagined as an AI. Detect the user\'s language and reply warmly in that language. Keep replies concise, usually under 40 words.',
           },
           { role: 'user', content: prompt },
         ],

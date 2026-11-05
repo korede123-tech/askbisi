@@ -1,10 +1,7 @@
-# Bisi – Voice to Voice (Node.js + OpenAI + ElevenLabs)
+# Ask Bisi – Voice to Voice (Node.js + OpenAI + ElevenLabs)
 
-A minimal system that:
-1. Listens to your voice (browser Web Speech API)
-2. Converts to text
-3. Generates a reply using OpenAI
-4. Speaks back with Bisi’s voice using ElevenLabs TTS
+Ask Bisi records speech in the browser, transcribes it with ElevenLabs, generates
+a response with OpenAI, and speaks using ElevenLabs TTS.
 
 ## Run
 
@@ -27,3 +24,14 @@ npm run dev           # or npm start
 
 The `.env` file is for local development only and is ignored by Git. Vercel uses
 the environment variables set in the project dashboard.
+
+## Use on iPhone or iPad
+
+Open the deployed site in Safari over HTTPS and allow microphone access when
+prompted. If access was previously denied, enable it for the site in iOS
+Settings, then reload the page. Audio recording requires a secure connection;
+the local-network development server is not a suitable iPhone test URL.
+
+The browser selects a recording format supported by the device (MP4 on Safari
+when available) and sends it to the existing transcription endpoint. LiveKit
+environment variables are not used by this restored version.
