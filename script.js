@@ -1,4 +1,4 @@
-import { Room, RoomEvent, Track, createLocalAudioTrack } from 'livekit-client';
+import { ParticipantKind, Room, RoomEvent, Track, createLocalAudioTrack } from 'livekit-client';
 
 const voiceButton = document.querySelector('#startBtn');
 const statusText = document.querySelector('#status');
@@ -9,6 +9,7 @@ let microphoneTrack;
 let audioContext;
 let analyser;
 let animationFrame;
+let agentConnectionTimeout;
 
 function setStatus(message) {
   if (statusText) statusText.textContent = message;
@@ -94,6 +95,7 @@ function attachRemoteAudio(track) {
 async function endConversation() {
   const activeRoom = room;
   room = undefined;
+  clearTimeout(agentConnectionTimeout);
   if (activeRoom) await activeRoom.disconnect();
   cleanUpAudio();
   setButtonState('idle');
@@ -128,11 +130,18 @@ async function startConversation() {
 
     const activeRoom = new Room({ adaptiveStream: true, dynacast: true });
     room = activeRoom;
+    const showAgentReady = (participant) => {
+      if (participant.kind !== ParticipantKind.AGENT) return;
+      clearTimeout(agentConnectionTimeout);
+      setStatus('Listening…');
+    };
+    activeRoom.on(RoomEvent.ParticipantConnected, showAgentReady);
     activeRoom.on(RoomEvent.TrackSubscribed, (track) => attachRemoteAudio(track));
     activeRoom.on(RoomEvent.TrackUnsubscribed, (track) => track.detach().forEach((element) => element.remove()));
     activeRoom.on(RoomEvent.Disconnected, () => {
       if (room !== activeRoom) return;
       room = undefined;
+      clearTimeout(agentConnectionTimeout);
       cleanUpAudio();
       setButtonState('idle');
       setStatus('Connection ended.');
@@ -145,11 +154,27 @@ async function startConversation() {
     await activeRoom.localParticipant.publishTrack(microphoneTrack);
 
     setButtonState('connected');
-    setStatus('You’re connected. Speak naturally — you can interrupt Bisi anytime.');
+    const agentAlreadyConnected = [...activeRoom.remoteParticipants.values()].some(
+      (participant) => participant.kind === ParticipantKind.AGENT,
+    );
+    if (agentAlreadyConnected) {
+      setStatus('Listening…');
+    } else {
+      setStatus('Waiting for Bisi…');
+      agentConnectionTimeout = setTimeout(() => {
+        const agentJoined = [...activeRoom.remoteParticipants.values()].some(
+          (participant) => participant.kind === ParticipantKind.AGENT,
+        );
+        if (room === activeRoom && !agentJoined) {
+          setStatus('Bisi’s voice service is unavailable. Please try again later.');
+        }
+      }, 20000);
+    }
   } catch (error) {
     console.error('Unable to start voice conversation:', error);
     const activeRoom = room;
     room = undefined;
+    clearTimeout(agentConnectionTimeout);
     if (activeRoom) await activeRoom.disconnect();
     cleanUpAudio();
     setButtonState('idle');
