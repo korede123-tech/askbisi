@@ -1,7 +1,7 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import multer from 'multer';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -119,7 +119,7 @@ app.post('/api/tts', async (req, res) => {
   }
 
   const apiKey = process.env.ELEVENLABS_API_KEY;
-  const voiceId = process.env.ELEVENLABS_VOICE_ID || 'IimeD4snpM9SZ68kCFuV';
+  const voiceId = process.env.ELEVENLABS_VOICE_ID || 'Z66ib1spzX3DsbiSJRZK';
   if (!apiKey) {
     return res.status(500).json({
       error: 'ElevenLabs API key is not configured. Add ELEVENLABS_API_KEY to your .env file.',
@@ -135,7 +135,7 @@ app.post('/api/tts', async (req, res) => {
       },
       body: JSON.stringify({
         text,
-        model_id: 'eleven_multilingual_v2',
+        model_id: process.env.ELEVENLABS_TTS_MODEL || 'eleven_flash_v2_5',
         voice_settings: { stability: 0.4, similarity_boost: 0.9 },
       }),
     });
@@ -168,6 +168,11 @@ app.use((req, res) => {
   res.sendFile(path.join(projectRoot, 'index.html'));
 });
 
-app.listen(port, () => {
-  console.log(`Bisi voice app is running on http://localhost:${port}`);
-});
+export default app;
+
+const invokedFile = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : '';
+if (invokedFile === import.meta.url) {
+  app.listen(port, () => {
+    console.log(`Bisi voice app is running on http://localhost:${port}`);
+  });
+}

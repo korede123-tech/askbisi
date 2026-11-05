@@ -12,9 +12,9 @@ let stopActiveRecording;
 
 const SPEECH_START_TIMEOUT_MS = 8000;
 const MAX_RECORDING_MS = 25000;
-const END_OF_SPEECH_SILENCE_MS = 900;
+const END_OF_SPEECH_SILENCE_MS = 650;
 const MIN_SPEECH_MS = 100;
-const MIN_UTTERANCE_MS = 900;
+const MIN_UTTERANCE_MS = 700;
 
 // === UNLOCK AUDIO CONTEXT (iOS & Android SAFE) ===
 document.addEventListener("touchstart", unlockAudioContext, { once: true });
