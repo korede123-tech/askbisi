@@ -9,12 +9,13 @@ let keepListening = false;
 let audioCtx;
 let levelFrame;
 let stopActiveRecording;
+let cancelActiveAudio;
 
 const SPEECH_START_TIMEOUT_MS = 8000;
 const MAX_RECORDING_MS = 25000;
+const MAX_PLAYBACK_LISTEN_MS = 30000;
 const END_OF_SPEECH_SILENCE_MS = 650;
 const MIN_SPEECH_MS = 100;
-const MIN_UTTERANCE_MS = 700;
 
 // === UNLOCK AUDIO CONTEXT (iOS & Android SAFE) ===
 document.addEventListener("touchstart", unlockAudioContext, { once: true });
@@ -25,19 +26,24 @@ startBtn.addEventListener("click", async () => {
   if (keepListening) {
     keepListening = false;
     startBtn.setAttribute("aria-pressed", "false");
+    startBtn.setAttribute("aria-label", "Ask Bisi");
     status.innerText = "🛑 Stopped listening.";
     stopActiveRecording?.();
+    cancelActiveAudio?.();
     return;
   }
 
   keepListening = true;
   startBtn.setAttribute("aria-pressed", "true");
+  startBtn.setAttribute("aria-label", "Stop listening");
   await unlockAudioContext();
+  let pendingRecording;
 
   while (keepListening) {
     try {
-      status.innerText = "🎤 Listening... speak now";
-      const recording = await recordAudio();
+      status.innerText = pendingRecording ? "🎤 Listening to your interruption..." : "🎤 Listening... speak now";
+      const recording = pendingRecording || await recordAudio();
+      pendingRecording = undefined;
       if (!keepListening) break;
       if (!recording.heardSpeech) {
         status.innerText = "I didn't catch clear speech. Try again.";
@@ -63,7 +69,9 @@ startBtn.addEventListener("click", async () => {
       status.innerText = `Bisi says: "${reply}"`;
 
       const voiceBlob = await textToSpeech(reply);
-      if (voiceBlob && keepListening) await playAudioAwaitable(voiceBlob);
+      if (voiceBlob && keepListening) {
+        pendingRecording = await playAudioAwaitable(voiceBlob);
+      }
     } catch (err) {
       console.error("🚨 Unexpected error:", err);
       status.innerText = "❌ Something went wrong (see console).";
@@ -72,11 +80,12 @@ startBtn.addEventListener("click", async () => {
   }
 
   startBtn.setAttribute("aria-pressed", "false");
+  startBtn.setAttribute("aria-label", "Ask Bisi");
   stopVoiceGlow();
 });
 
 // === RECORD AUDIO ===
-async function recordAudio() {
+async function recordAudio({ onReady, onSpeechStart, waitForSpeechMs = SPEECH_START_TIMEOUT_MS } = {}) {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
       echoCancellation: true,
@@ -107,6 +116,8 @@ async function recordAudio() {
     let lastVoiceAt = 0;
     let aboveThresholdAt = 0;
     let voiceThreshold = 0.015;
+    let readyNotified = false;
+    let speechStartNotified = false;
     let voiceCheck;
 
     const stopRecording = () => {
@@ -155,22 +166,32 @@ async function recordAudio() {
           noiseSamples.sort((a, b) => a - b);
           voiceThreshold = Math.max(0.012, Math.min(0.035, noiseSamples[1] * 2.5));
         }
-      } else if (volume >= voiceThreshold) {
-        if (!aboveThresholdAt) aboveThresholdAt = now;
-        if (!speechStartedAt && now - aboveThresholdAt >= MIN_SPEECH_MS) {
-          speechStartedAt = aboveThresholdAt;
-        }
-        if (speechStartedAt) lastVoiceAt = now;
       } else {
-        aboveThresholdAt = 0;
+        if (!readyNotified) {
+          readyNotified = true;
+          onReady?.();
+        }
+
+        if (volume >= voiceThreshold) {
+          if (!aboveThresholdAt) aboveThresholdAt = now;
+          if (!speechStartedAt && now - aboveThresholdAt >= MIN_SPEECH_MS) {
+            speechStartedAt = aboveThresholdAt;
+          }
+          if (speechStartedAt) {
+            lastVoiceAt = now;
+            if (!speechStartNotified) {
+              speechStartNotified = true;
+              onSpeechStart?.();
+            }
+          }
+        } else {
+          aboveThresholdAt = 0;
+        }
       }
 
-      const speechDuration = speechStartedAt ? now - speechStartedAt : 0;
       if (
-        (speechStartedAt &&
-          speechDuration >= MIN_UTTERANCE_MS &&
-          now - lastVoiceAt >= END_OF_SPEECH_SILENCE_MS) ||
-        (!speechStartedAt && elapsed >= SPEECH_START_TIMEOUT_MS) ||
+        (speechStartedAt && now - lastVoiceAt >= END_OF_SPEECH_SILENCE_MS) ||
+        (!speechStartedAt && elapsed >= waitForSpeechMs) ||
         elapsed >= MAX_RECORDING_MS
       ) {
         stopRecording();
@@ -207,7 +228,7 @@ function stopVoiceGlow() {
   if (levelFrame) cancelAnimationFrame(levelFrame);
   levelFrame = undefined;
   micWrapper.classList.remove("is-listening");
-  micWrapper.style.setProperty("--voice-glow-opacity", "0");
+  micWrapper.style.setProperty("--voice-glow-opacity", "0.2");
   micWrapper.style.setProperty("--voice-glow-scale", "1");
   micWrapper.style.setProperty("--voice-core-scale", "1");
 }
@@ -344,14 +365,61 @@ async function textToSpeech(text) {
 }
 
 // === PLAY AUDIO ===
-function playAudioAwaitable(blob) {
-  return new Promise(async (resolve) => {
-    await unlockAudioContext();
-    const audio = new Audio(URL.createObjectURL(blob));
-    audio.onended = resolve;
-    audio.onerror = resolve;
-    audio.play().catch((e) => console.warn("Playback error:", e));
+async function playAudioAwaitable(blob) {
+  await unlockAudioContext();
+  const audioUrl = URL.createObjectURL(blob);
+  const audio = new Audio(audioUrl);
+  let finishAudio;
+  const audioFinished = new Promise((resolve) => {
+    finishAudio = resolve;
   });
+
+  audio.onended = () => finishAudio("ended");
+  audio.onerror = () => finishAudio("error");
+  const recordingPromise = recordAudio({
+    waitForSpeechMs: MAX_PLAYBACK_LISTEN_MS,
+    onReady: () => {
+      if (keepListening) {
+        audio.play().catch((error) => {
+          console.warn("Playback error:", error);
+          finishAudio("error");
+        });
+      } else {
+        finishAudio("cancelled");
+      }
+    },
+    onSpeechStart: () => {
+      status.innerText = "I hear you—go ahead.";
+      audio.pause();
+    },
+  });
+
+  cancelActiveAudio = () => {
+    audio.pause();
+    finishAudio("cancelled");
+    stopActiveRecording?.();
+  };
+
+  try {
+    const outcome = await Promise.race([
+      recordingPromise.then((recording) => ({ type: "recording", recording })),
+      audioFinished.then((type) => ({ type })),
+    ]);
+
+    if (outcome.type !== "recording") {
+      stopActiveRecording?.();
+      await recordingPromise;
+      return null;
+    }
+
+    return outcome.recording.heardSpeech ? outcome.recording : null;
+  } finally {
+    cancelActiveAudio = undefined;
+    audio.pause();
+    audio.onended = null;
+    audio.onerror = null;
+    URL.revokeObjectURL(audioUrl);
+  }
 }
 
 // === UNLOCK CONTEXT ===
