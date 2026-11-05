@@ -14,7 +14,7 @@ let cancelActiveAudio;
 const SPEECH_START_TIMEOUT_MS = 8000;
 const MAX_RECORDING_MS = 25000;
 const MAX_PLAYBACK_LISTEN_MS = 30000;
-const END_OF_SPEECH_SILENCE_MS = 650;
+const END_OF_SPEECH_SILENCE_MS = 1200;
 const MIN_SPEECH_MS = 100;
 
 // === UNLOCK AUDIO CONTEXT (iOS & Android SAFE) ===
@@ -52,8 +52,7 @@ startBtn.addEventListener("click", async () => {
       console.log("🎧 Recorded audioBlob:", recording.blob);
 
       status.innerText = "Processing your speech...";
-      const wavBlob = await blobToWav(recording.blob);
-      const userText = await transcribeAudio(wavBlob);
+      const userText = await transcribeAudio(recording.blob);
       if (!userText || !keepListening) continue;
 
       if (/^\[[^\]]+\]$/.test(userText.trim())) {
@@ -233,64 +232,16 @@ function stopVoiceGlow() {
   micWrapper.style.setProperty("--voice-core-scale", "1");
 }
 
-// === CONVERT AUDIOBLOB → WAV (UNIVERSAL) ===
-async function blobToWav(blob) {
-  const arrayBuffer = await blob.arrayBuffer();
-  const ctx = new (window.AudioContext || window.webkitAudioContext)();
-  const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-  const wavBuffer = audioBufferToWav(audioBuffer);
-  return new Blob([wavBuffer], { type: "audio/wav" });
-}
-
-// === HELPER: AUDIOBUFFER → WAV ===
-function audioBufferToWav(buffer) {
-  const numOfChan = buffer.numberOfChannels,
-    length = buffer.length * numOfChan * 2 + 44,
-    bufferArr = new ArrayBuffer(length),
-    view = new DataView(bufferArr),
-    channels = [],
-    sampleRate = buffer.sampleRate;
-
-  let offset = 0;
-  function writeString(str) {
-    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
-    offset += str.length;
-  }
-
-  writeString("RIFF");
-  view.setUint32(offset, 36 + buffer.length * numOfChan * 2, true); offset += 4;
-  writeString("WAVE");
-  writeString("fmt ");
-  view.setUint32(offset, 16, true); offset += 4;
-  view.setUint16(offset, 1, true); offset += 2;
-  view.setUint16(offset, numOfChan, true); offset += 2;
-  view.setUint32(offset, sampleRate, true); offset += 4;
-  view.setUint32(offset, sampleRate * numOfChan * 2, true); offset += 4;
-  view.setUint16(offset, numOfChan * 2, true); offset += 2;
-  view.setUint16(offset, 16, true); offset += 2;
-  writeString("data");
-  view.setUint32(offset, buffer.length * numOfChan * 2, true); offset += 4;
-
-  for (let i = 0; i < numOfChan; i++) channels.push(buffer.getChannelData(i));
-
-  let interleaved = new Float32Array(buffer.length * numOfChan);
-  for (let i = 0; i < buffer.length; i++)
-    for (let c = 0; c < numOfChan; c++)
-      interleaved[i * numOfChan + c] = channels[c][i];
-
-  let idx = 44;
-  for (let i = 0; i < interleaved.length; i++, idx += 2) {
-    let s = Math.max(-1, Math.min(1, interleaved[i]));
-    view.setInt16(idx, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-  }
-  return bufferArr;
-}
-
 // === SPEECH-TO-TEXT ===
-async function transcribeAudio(wavBlob) {
+async function transcribeAudio(audioBlob) {
   try {
     const formData = new FormData();
-    formData.append("file", wavBlob, "speech.wav");
+    const extension = audioBlob.type.includes("mp4")
+      ? "mp4"
+      : audioBlob.type.includes("webm")
+      ? "webm"
+      : "audio";
+    formData.append("file", audioBlob, `speech.${extension}`);
 
     const response = await fetch(`${API_BASE}/api/transcribe`, {
       method: "POST",
