@@ -1,0 +1,98 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  display: grid;
+  place-items: center;
+  background: #050407;
+  color: #fff;
+  font-family: "Segoe UI", sans-serif;
+}
+
+.container {
+  text-align: center;
+}
+
+.mic-wrapper {
+  --voice-glow-opacity: 0;
+  --voice-glow-scale: 1;
+  --voice-core-scale: 1;
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  isolation: isolate;
+}
+
+.mic-wrapper::before {
+  position: absolute;
+  z-index: -1;
+  width: 190px;
+  height: 190px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 45, 154, 0.8), rgba(133, 59, 255, 0.4) 35%, rgba(32, 192, 255, 0.15) 55%, transparent 72%);
+  content: "";
+  opacity: var(--voice-glow-opacity);
+  transform: scale(var(--voice-glow-scale));
+  transition: opacity 90ms ease-out, transform 90ms ease-out;
+  filter: blur(7px);
+  pointer-events: none;
+}
+
+.mic-button {
+  position: relative;
+  z-index: 1;
+  width: 100px;
+  height: 100px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+}
+
+.glow-core {
+  position: absolute;
+  inset: -18px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.95) 0, rgba(100, 235, 255, 0.85) 8%, rgba(79, 144, 255, 0.52) 24%, rgba(185, 51, 255, 0.25) 43%, transparent 70%);
+  opacity: calc(0.55 + var(--voice-glow-opacity) * 0.45);
+  filter: blur(9px);
+  transform: scale(var(--voice-core-scale));
+  transition: opacity 90ms ease-out, transform 90ms ease-out;
+  animation: glow-breathe 3s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.mic-button:focus-visible {
+  outline: 2px solid #ff4d9d;
+  outline-offset: 6px;
+}
+
+#status {
+  margin-top: 1rem;
+  color: #aaa;
+  font-size: 1rem;
+}
+
+@keyframes glow-breathe {
+  0%, 100% {
+    filter: blur(9px) brightness(0.9);
+  }
+  50% {
+    filter: blur(12px) brightness(1.15);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .glow-core {
+    animation: none !important;
+  }
+
+  .mic-wrapper::before,
+  .glow-core {
+    transition: none;
+  }
+}

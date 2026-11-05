@@ -1,0 +1,29 @@
+{
+  "name": "bisi-voice-app",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "brain.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "dev": "node --watch server/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "axios": "^1.11.0",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "express-list-endpoints": "^7.1.1",
+    "formdata-node": "^6.0.3",
+    "fs": "^0.0.1-security",
+    "mic": "^2.1.2",
+    "multer": "^2.0.2",
+    "node-fetch": "^2.7.0",
+    "node-record-lpcm16": "^1.0.1",
+    "openai": "^3.2.1",
+    "path": "^0.12.7",
+    "play-sound": "^1.1.6"
+  }
+}
