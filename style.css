@@ -55,15 +55,46 @@ body {
 
 .glow-core {
   position: absolute;
-  inset: -18px;
+  inset: -8px;
+  display: grid;
+  place-items: center;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(255, 255, 255, 0.98) 0, rgba(57, 208, 255, 0.86) 8%, rgba(110, 102, 255, 0.58) 24%, rgba(255, 88, 190, 0.34) 43%, transparent 70%);
+  background: radial-gradient(circle, rgba(57, 208, 255, 0.34), rgba(110, 102, 255, 0.25) 42%, rgba(255, 88, 190, 0.14) 60%, transparent 73%);
   opacity: calc(0.78 + var(--voice-glow-opacity) * 0.22);
-  filter: blur(12px);
   transform: scale(var(--voice-core-scale));
-  transition: opacity 90ms ease-out, transform 90ms ease-out;
+  transition: opacity 90ms ease-out, transform 90ms ease-out, filter 90ms ease-out;
   animation: glow-breathe 3s ease-in-out infinite;
   pointer-events: none;
+}
+
+.globe {
+  width: 76px;
+  height: 76px;
+  overflow: visible;
+  filter: drop-shadow(0 0 12px rgba(0, 130, 255, 0.82));
+}
+
+.globe-sphere {
+  fill: url("#globe-fill");
+}
+
+.globe-continents {
+  fill: url("#continent-fill");
+}
+
+.globe-lines {
+  fill: none;
+  stroke: rgba(105, 208, 255, 0.38);
+  stroke-width: 0.9;
+  transform-box: view-box;
+  transform-origin: center;
+  animation: globe-rotate 8s linear infinite;
+}
+
+.globe-rim {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.76);
+  stroke-width: 1.4;
 }
 
 .mic-button:focus-visible {
@@ -82,12 +113,19 @@ body {
     filter: blur(12px) brightness(0.9);
   }
   50% {
-    filter: blur(16px) brightness(1.15);
+    filter: brightness(1.15);
+  }
+}
+
+@keyframes globe-rotate {
+  to {
+    transform: rotate(360deg);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .glow-core {
+  .glow-core,
+  .globe-lines {
     animation: none !important;
   }
 

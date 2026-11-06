@@ -15,7 +15,7 @@ let audioContextPrimed = false;
 const SPEECH_START_TIMEOUT_MS = 8000;
 const MAX_RECORDING_MS = 60000;
 const MAX_PLAYBACK_LISTEN_MS = 30000;
-const END_OF_SPEECH_SILENCE_MS = 1200;
+const END_OF_SPEECH_SILENCE_MS = 800;
 const MIN_SPEECH_MS = 100;
 const CHROME_AUDIO_ROUTE = /(?:Chrome|CriOS|Chromium)\//.test(navigator.userAgent)
   && !/(?:Edg|OPR)\//.test(navigator.userAgent);
