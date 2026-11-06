@@ -10,12 +10,15 @@ let audioCtx;
 let levelFrame;
 let stopActiveRecording;
 let cancelActiveAudio;
+let audioContextPrimed = false;
 
 const SPEECH_START_TIMEOUT_MS = 8000;
 const MAX_RECORDING_MS = 25000;
 const MAX_PLAYBACK_LISTEN_MS = 30000;
 const END_OF_SPEECH_SILENCE_MS = 800;
 const MIN_SPEECH_MS = 100;
+const CHROME_AUDIO_ROUTE = /(?:Chrome|CriOS|Chromium)\//.test(navigator.userAgent)
+  && !/(?:Edg|OPR)\//.test(navigator.userAgent);
 
 // === UNLOCK AUDIO CONTEXT (iOS & Android SAFE) ===
 document.addEventListener("touchstart", unlockAudioContext, { once: true });
@@ -61,7 +64,14 @@ startBtn.addEventListener("click", async () => {
       console.log("🎧 Recorded audioBlob:", recording.blob);
 
       status.innerText = "Processing your speech...";
-      const userText = await transcribeAudio(recording.blob);
+      let userText;
+      try {
+        userText = await transcribeAudio(recording.blob);
+      } catch (error) {
+        console.error("Speech transcription failed:", error);
+        status.innerText = `Could not understand the recording: ${error.message}`;
+        continue;
+      }
       if (!userText || !keepListening) continue;
 
       if (/^\[[^\]]+\]$/.test(userText.trim())) {
@@ -76,8 +86,17 @@ startBtn.addEventListener("click", async () => {
 
       status.innerText = `Bisi says: "${reply}"`;
 
-      const voiceBlob = await textToSpeech(reply);
+      let voiceBlob;
+      try {
+        voiceBlob = await textToSpeech(reply);
+      } catch (error) {
+        console.error("Speech synthesis failed:", error);
+        status.innerText = `I heard you, but couldn't create a voice reply: ${error.message}`;
+        keepListening = false;
+        break;
+      }
       if (voiceBlob && keepListening) {
+        status.innerText = "Speaking…";
         pendingRecording = await playAudioAwaitable(voiceBlob);
       }
     } catch (err) {
@@ -154,12 +173,16 @@ async function recordAudio({ onReady, onSpeechStart, waitForSpeechMs = SPEECH_ST
     stopActiveRecording = stopRecording;
     recorder.ondataavailable = (e) => chunks.push(e.data);
     recorder.onstop = () => {
-      const blob = new Blob(chunks, { type: recorder.mimeType || "application/octet-stream" });
+      const blob = new Blob(chunks, { type: recorder.mimeType || chunks[0]?.type || "application/octet-stream" });
       if (voiceCheck) clearInterval(voiceCheck);
       stopActiveRecording = undefined;
       stopVoiceGlow();
       microphone.disconnect();
       stream.getTracks().forEach((track) => track.stop());
+      if (!blob.size) {
+        reject(new Error("Your browser recorded an empty audio clip. Update Safari and try again."));
+        return;
+      }
       resolve({ blob, heardSpeech: Boolean(speechStartedAt) });
     };
     recorder.onerror = (event) => {
@@ -295,17 +318,18 @@ async function transcribeAudio(audioBlob) {
     });
 
     if (!response.ok) {
-      const errText = await response.text();
-      console.error("🛑 Transcription failed:", errText);
-      return null;
+      const errorData = await response.json().catch(() => ({}));
+      const detail = errorData.error || errorData.detail || "Speech transcription failed.";
+      const message = typeof detail === "string" ? detail : detail.message || "Speech transcription failed.";
+      throw new Error(message);
     }
 
     const result = await response.json();
     console.log("📜 Transcription:", result);
     return result.text || "";
   } catch (err) {
-    console.error("Transcription error:", err);
-    return null;
+    if (err instanceof Error) throw err;
+    throw new Error("Could not reach speech transcription. Check your internet connection and try again.");
   }
 }
 
@@ -350,14 +374,17 @@ async function textToSpeech(text) {
       const errorData = await response.json().catch(() => ({}));
       const message = errorData.error || "Text-to-speech request failed.";
       console.error("🛑 TTS failed:", message, errorData.code || "");
-      status.innerText = message;
-      return null;
+      throw new Error(message);
     }
 
-    return await response.blob();
+    const audio = await response.blob();
+    if (!audio.size) throw new Error("The speech service returned an empty audio file.");
+    return audio;
   } catch (err) {
     console.error("TTS error:", err);
-    return null;
+    throw err instanceof Error
+      ? err
+      : new Error("Could not reach the speech service. Check your internet connection and try again.");
   }
 }
 
@@ -381,29 +408,53 @@ async function playAudioAwaitable(blob) {
   };
   const startPlayback = () => {
     if (source || !keepListening) return;
-    source = audioCtx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(audioCtx.destination);
-    source.onended = () => {
-      const endedSource = source;
-      source = undefined;
-      endedSource?.disconnect();
-      resolveAudioFinished("ended");
-    };
-    source.start();
+    void (async () => {
+      if (audioCtx.state !== "running") await audioCtx.resume();
+      if (audioCtx.state !== "running") {
+        throw new Error("iPhone audio is paused. Tap Ask Bisi to enable audio, then try again.");
+      }
+      if (!keepListening) return;
+
+      source = audioCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioCtx.destination);
+      source.onended = () => {
+        const endedSource = source;
+        source = undefined;
+        endedSource?.disconnect();
+        resolveAudioFinished("ended");
+      };
+      source.start();
+    })().catch((error) => {
+      console.error("Playback error:", error);
+      status.innerText = error.message || "Bisi’s reply could not be played. Check your device volume and try again.";
+      keepListening = false;
+      resolveAudioFinished("error");
+    });
   };
+
+  // Keep the microphone closed during Chrome playback to avoid mobile audio-route conflicts.
+  if (CHROME_AUDIO_ROUTE) {
+    cancelActiveAudio = () => {
+      stopPlayback();
+      resolveAudioFinished("cancelled");
+    };
+
+    try {
+      startPlayback();
+      await audioFinished;
+      return null;
+    } finally {
+      cancelActiveAudio = undefined;
+      stopPlayback();
+    }
+  }
 
   const recordingPromise = recordAudio({
     waitForSpeechMs: MAX_PLAYBACK_LISTEN_MS,
     onReady: () => {
       if (keepListening) {
-        try {
-          startPlayback();
-        } catch (error) {
-          console.error("Playback error:", error);
-          status.innerText = "Bisi’s reply could not be played. Check your device volume and try again.";
-          resolveAudioFinished("error");
-        }
+        startPlayback();
       } else {
         resolveAudioFinished("cancelled");
       }
@@ -442,5 +493,17 @@ async function playAudioAwaitable(blob) {
 // === UNLOCK CONTEXT ===
 async function unlockAudioContext() {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  if (audioCtx.state === "suspended") await audioCtx.resume();
+  const resumePromise = audioCtx.state === "suspended" ? audioCtx.resume() : Promise.resolve();
+  if (!audioContextPrimed) {
+    const silentSource = audioCtx.createBufferSource();
+    silentSource.buffer = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
+    silentSource.connect(audioCtx.destination);
+    silentSource.onended = () => silentSource.disconnect();
+    silentSource.start();
+    audioContextPrimed = true;
+  }
+  await resumePromise;
+  if (audioCtx.state !== "running") {
+    throw new Error("Audio is unavailable. Check your iPhone’s silent mode, output route, and Safari permissions.");
+  }
 }
