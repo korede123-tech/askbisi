@@ -13,9 +13,9 @@ let cancelActiveAudio;
 let audioContextPrimed = false;
 
 const SPEECH_START_TIMEOUT_MS = 8000;
-const MAX_RECORDING_MS = 25000;
+const MAX_RECORDING_MS = 60000;
 const MAX_PLAYBACK_LISTEN_MS = 30000;
-const END_OF_SPEECH_SILENCE_MS = 800;
+const END_OF_SPEECH_SILENCE_MS = 1200;
 const MIN_SPEECH_MS = 100;
 const CHROME_AUDIO_ROUTE = /(?:Chrome|CriOS|Chromium)\//.test(navigator.userAgent)
   && !/(?:Edg|OPR)\//.test(navigator.userAgent);
@@ -117,6 +117,7 @@ async function recordAudio({
   onSpeechStart,
   waitForSpeechMs = SPEECH_START_TIMEOUT_MS,
   existingStream,
+  speechAlreadyStarted = false,
 } = {}) {
   if (!window.isSecureContext) {
     throw new Error("Microphone access requires HTTPS. Open Ask Bisi using its secure website address.");
@@ -161,8 +162,8 @@ async function recordAudio({
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
     const noiseSamples = [];
-    let speechStartedAt = 0;
-    let lastVoiceAt = 0;
+    let speechStartedAt = speechAlreadyStarted ? startedAt : 0;
+    let lastVoiceAt = speechAlreadyStarted ? startedAt : 0;
     let aboveThresholdAt = 0;
     let voiceThreshold = 0.015;
     let readyNotified = false;
@@ -223,7 +224,7 @@ async function recordAudio({
       }
 
       const volume = Math.sqrt(sumOfSquares / samples.length);
-      if (elapsed < 350) {
+      if (!speechStartedAt && elapsed < 350) {
         noiseSamples.push(volume);
         if (noiseSamples.length === 5) {
           noiseSamples.sort((a, b) => a - b);
@@ -441,17 +442,6 @@ async function playAudioAwaitable(blob) {
   // Monitor Chrome's mic without recording until the user actually interrupts.
   if (CHROME_AUDIO_ROUTE) {
     let stopInterruptionMonitor = () => {};
-    const interruptionPromise = monitorChromeInterruption(stopPlayback, () => Boolean(source && keepListening))
-      .then((monitor) => {
-        stopInterruptionMonitor = monitor.stop;
-        return monitor.recording;
-      })
-      .catch((error) => {
-        console.warn("Could not monitor for a Chrome voice interruption:", error);
-        status.innerText = "Bisi is speaking. Microphone interruption is unavailable.";
-        return null;
-      });
-
     cancelActiveAudio = () => {
       stopPlayback();
       resolveAudioFinished("cancelled");
@@ -459,7 +449,18 @@ async function playAudioAwaitable(blob) {
       stopActiveRecording?.();
     };
 
+    let monitor;
     try {
+      monitor = await monitorChromeInterruption(
+        stopPlayback,
+        () => Boolean(source && keepListening),
+        () => keepListening,
+      );
+      stopInterruptionMonitor = monitor.stop;
+      const interruptionPromise = monitor.recording;
+      await monitor.ready;
+      if (!keepListening) return null;
+
       startPlayback();
       const outcome = await Promise.race([
         audioFinished.then(() => ({ type: "finished" })),
@@ -468,9 +469,15 @@ async function playAudioAwaitable(blob) {
       if (outcome.type === "interrupted" && outcome.recording) return outcome.recording;
       if (outcome.type === "interrupted") await audioFinished;
       return null;
+    } catch (error) {
+      console.warn("Could not monitor for a Chrome voice interruption:", error);
+      status.innerText = "Bisi is speaking. Microphone interruption is unavailable.";
+      startPlayback();
+      await audioFinished;
+      return null;
     } finally {
       cancelActiveAudio = undefined;
-      stopInterruptionMonitor();
+      monitor?.stop();
       stopPlayback();
     }
   }
@@ -515,7 +522,7 @@ async function playAudioAwaitable(blob) {
   }
 }
 
-async function monitorChromeInterruption(stopPlayback, isPlaying) {
+async function monitorChromeInterruption(stopPlayback, isPlaying, isActive) {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
       echoCancellation: true,
@@ -541,9 +548,13 @@ async function monitorChromeInterruption(stopPlayback, isPlaying) {
   let handedOff = false;
   let checkInterval;
   let resolveRecording;
+  let resolveReady;
 
   const recording = new Promise((resolve) => {
     resolveRecording = resolve;
+  });
+  const ready = new Promise((resolve) => {
+    resolveReady = resolve;
   });
   const stop = () => {
     if (!active) return;
@@ -551,11 +562,12 @@ async function monitorChromeInterruption(stopPlayback, isPlaying) {
     clearInterval(checkInterval);
     microphone.disconnect();
     if (!handedOff) stream.getTracks().forEach((track) => track.stop());
+    resolveReady();
     resolveRecording(null);
   };
 
   checkInterval = setInterval(() => {
-    if (!isPlaying()) {
+    if (!isActive()) {
       stop();
       return;
     }
@@ -571,10 +583,13 @@ async function monitorChromeInterruption(stopPlayback, isPlaying) {
       noiseSamples.push(volume);
       if (noiseSamples.length === 7) {
         noiseSamples.sort((a, b) => a - b);
-        threshold = Math.max(0.018, Math.min(0.045, noiseSamples[3] * 2.5));
+        threshold = Math.max(0.012, Math.min(0.035, noiseSamples[3] * 2.5));
+        resolveReady();
       }
       return;
     }
+
+    if (!isPlaying()) return;
 
     const now = Date.now();
     if (volume >= threshold) {
@@ -589,6 +604,7 @@ async function monitorChromeInterruption(stopPlayback, isPlaying) {
         void recordAudio({
           existingStream: stream,
           waitForSpeechMs: MAX_RECORDING_MS,
+          speechAlreadyStarted: true,
         }).then(resolveRecording, (error) => {
           stream.getTracks().forEach((track) => track.stop());
           resolveRecording(null);
@@ -601,7 +617,7 @@ async function monitorChromeInterruption(stopPlayback, isPlaying) {
     }
   }, 50);
 
-  return { recording, stop };
+  return { recording, ready, stop };
 }
 
 // === UNLOCK CONTEXT ===
