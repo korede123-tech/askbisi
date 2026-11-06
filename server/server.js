@@ -127,18 +127,21 @@ app.post('/api/tts', async (req, res) => {
   }
 
   try {
-    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
-      method: 'POST',
-      headers: {
-        'xi-api-key': apiKey,
-        'Content-Type': 'application/json',
+    const response = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?optimize_streaming_latency=3`,
+      {
+        method: 'POST',
+        headers: {
+          'xi-api-key': apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text,
+          model_id: process.env.ELEVENLABS_TTS_MODEL || 'eleven_flash_v2_5',
+          voice_settings: { stability: 0.4, similarity_boost: 0.9 },
+        }),
       },
-      body: JSON.stringify({
-        text,
-        model_id: process.env.ELEVENLABS_TTS_MODEL || 'eleven_flash_v2_5',
-        voice_settings: { stability: 0.4, similarity_boost: 0.9 },
-      }),
-    });
+    );
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => null);

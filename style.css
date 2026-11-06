@@ -7,8 +7,8 @@ body {
   margin: 0;
   display: grid;
   place-items: center;
-  background: #f7f8fc;
-  color: #25243a;
+  background: #080d18;
+  color: #e8f1ff;
   font-family: "Segoe UI", sans-serif;
 }
 
@@ -32,12 +32,12 @@ body {
   width: 190px;
   height: 190px;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(255, 45, 154, 0.58), rgba(133, 59, 255, 0.32) 35%, rgba(32, 192, 255, 0.2) 55%, transparent 72%);
+  background: radial-gradient(circle, rgba(24, 132, 255, 0.62), rgba(0, 91, 220, 0.34) 38%, rgba(0, 173, 255, 0.2) 58%, transparent 74%);
   content: "";
   opacity: var(--voice-glow-opacity);
   transform: scale(var(--voice-glow-scale));
   transition: opacity 90ms ease-out, transform 90ms ease-out;
-  filter: blur(7px);
+  filter: blur(12px);
   pointer-events: none;
 }
 
@@ -59,18 +59,36 @@ body {
   display: grid;
   place-items: center;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(57, 208, 255, 0.34), rgba(110, 102, 255, 0.25) 42%, rgba(255, 88, 190, 0.14) 60%, transparent 73%);
   opacity: calc(0.78 + var(--voice-glow-opacity) * 0.22);
   transform: scale(var(--voice-core-scale));
-  transition: opacity 90ms ease-out, transform 90ms ease-out, filter 90ms ease-out;
-  animation: glow-breathe 3s ease-in-out infinite;
+  transition: opacity 90ms ease-out, transform 90ms ease-out;
   pointer-events: none;
 }
 
+.glow-core::before {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(48, 166, 255, 0.42), rgba(0, 112, 255, 0.3) 44%, rgba(0, 194, 255, 0.16) 64%, transparent 76%);
+  content: "";
+  filter: blur(12px);
+}
+
 .globe {
+  display: none;
   width: 76px;
   height: 76px;
   overflow: visible;
+  filter: drop-shadow(0 0 12px rgba(0, 130, 255, 0.82));
+}
+
+.globe-video {
+  position: relative;
+  z-index: 1;
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  object-fit: cover;
   filter: drop-shadow(0 0 12px rgba(0, 130, 255, 0.82));
 }
 
@@ -98,23 +116,14 @@ body {
 }
 
 .mic-button:focus-visible {
-  outline: 2px solid #ff4d9d;
+  outline: 2px solid #4aa8ff;
   outline-offset: 6px;
 }
 
 #status {
   margin-top: 1rem;
-  color: #68677b;
+  color: #a9bad4;
   font-size: 1rem;
-}
-
-@keyframes glow-breathe {
-  0%, 100% {
-    filter: blur(12px) brightness(0.9);
-  }
-  50% {
-    filter: brightness(1.15);
-  }
 }
 
 @keyframes globe-rotate {
@@ -124,7 +133,6 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .glow-core,
   .globe-lines {
     animation: none !important;
   }

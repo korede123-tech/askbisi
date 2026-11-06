@@ -15,7 +15,7 @@ let audioContextPrimed = false;
 const SPEECH_START_TIMEOUT_MS = 8000;
 const MAX_RECORDING_MS = 60000;
 const MAX_PLAYBACK_LISTEN_MS = 30000;
-const END_OF_SPEECH_SILENCE_MS = 800;
+const END_OF_SPEECH_SILENCE_MS = 600;
 const MIN_SPEECH_MS = 100;
 const CHROME_AUDIO_ROUTE = /(?:Chrome|CriOS|Chromium)\//.test(navigator.userAgent)
   && !/(?:Edg|OPR)\//.test(navigator.userAgent);
@@ -471,7 +471,6 @@ async function playAudioAwaitable(blob) {
       return null;
     } catch (error) {
       console.warn("Could not monitor for a Chrome voice interruption:", error);
-      status.innerText = "Bisi is speaking. Microphone interruption is unavailable.";
       startPlayback();
       await audioFinished;
       return null;
