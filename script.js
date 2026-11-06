@@ -112,7 +112,12 @@ startBtn.addEventListener("click", async () => {
 });
 
 // === RECORD AUDIO ===
-async function recordAudio({ onReady, onSpeechStart, waitForSpeechMs = SPEECH_START_TIMEOUT_MS } = {}) {
+async function recordAudio({
+  onReady,
+  onSpeechStart,
+  waitForSpeechMs = SPEECH_START_TIMEOUT_MS,
+  existingStream,
+} = {}) {
   if (!window.isSecureContext) {
     throw new Error("Microphone access requires HTTPS. Open Ask Bisi using its secure website address.");
   }
@@ -120,7 +125,7 @@ async function recordAudio({ onReady, onSpeechStart, waitForSpeechMs = SPEECH_ST
     throw new Error("This browser cannot record audio. Please use the latest version of Safari.");
   }
 
-  const stream = await navigator.mediaDevices.getUserMedia({
+  const stream = existingStream || await navigator.mediaDevices.getUserMedia({
     audio: {
       echoCancellation: true,
       noiseSuppression: true,
@@ -433,19 +438,39 @@ async function playAudioAwaitable(blob) {
     });
   };
 
-  // Keep the microphone closed during Chrome playback to avoid mobile audio-route conflicts.
+  // Monitor Chrome's mic without recording until the user actually interrupts.
   if (CHROME_AUDIO_ROUTE) {
+    let stopInterruptionMonitor = () => {};
+    const interruptionPromise = monitorChromeInterruption(stopPlayback, () => Boolean(source && keepListening))
+      .then((monitor) => {
+        stopInterruptionMonitor = monitor.stop;
+        return monitor.recording;
+      })
+      .catch((error) => {
+        console.warn("Could not monitor for a Chrome voice interruption:", error);
+        status.innerText = "Bisi is speaking. Microphone interruption is unavailable.";
+        return null;
+      });
+
     cancelActiveAudio = () => {
       stopPlayback();
       resolveAudioFinished("cancelled");
+      stopInterruptionMonitor();
+      stopActiveRecording?.();
     };
 
     try {
       startPlayback();
-      await audioFinished;
+      const outcome = await Promise.race([
+        audioFinished.then(() => ({ type: "finished" })),
+        interruptionPromise.then((recording) => ({ type: "interrupted", recording })),
+      ]);
+      if (outcome.type === "interrupted" && outcome.recording) return outcome.recording;
+      if (outcome.type === "interrupted") await audioFinished;
       return null;
     } finally {
       cancelActiveAudio = undefined;
+      stopInterruptionMonitor();
       stopPlayback();
     }
   }
@@ -488,6 +513,95 @@ async function playAudioAwaitable(blob) {
     cancelActiveAudio = undefined;
     stopPlayback();
   }
+}
+
+async function monitorChromeInterruption(stopPlayback, isPlaying) {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  });
+  if (!isPlaying()) {
+    stream.getTracks().forEach((track) => track.stop());
+    return { recording: null, stop: () => {} };
+  }
+
+  const analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 512;
+  analyser.smoothingTimeConstant = 0.75;
+  const microphone = audioCtx.createMediaStreamSource(stream);
+  microphone.connect(analyser);
+  const samples = new Uint8Array(analyser.fftSize);
+  const noiseSamples = [];
+  let threshold = 0.018;
+  let aboveThresholdAt = 0;
+  let active = true;
+  let handedOff = false;
+  let checkInterval;
+  let resolveRecording;
+
+  const recording = new Promise((resolve) => {
+    resolveRecording = resolve;
+  });
+  const stop = () => {
+    if (!active) return;
+    active = false;
+    clearInterval(checkInterval);
+    microphone.disconnect();
+    if (!handedOff) stream.getTracks().forEach((track) => track.stop());
+    resolveRecording(null);
+  };
+
+  checkInterval = setInterval(() => {
+    if (!isPlaying()) {
+      stop();
+      return;
+    }
+
+    analyser.getByteTimeDomainData(samples);
+    let sumOfSquares = 0;
+    for (const sample of samples) {
+      const amplitude = (sample - 128) / 128;
+      sumOfSquares += amplitude * amplitude;
+    }
+    const volume = Math.sqrt(sumOfSquares / samples.length);
+    if (noiseSamples.length < 7) {
+      noiseSamples.push(volume);
+      if (noiseSamples.length === 7) {
+        noiseSamples.sort((a, b) => a - b);
+        threshold = Math.max(0.018, Math.min(0.045, noiseSamples[3] * 2.5));
+      }
+      return;
+    }
+
+    const now = Date.now();
+    if (volume >= threshold) {
+      aboveThresholdAt ||= now;
+      if (now - aboveThresholdAt >= MIN_SPEECH_MS) {
+        active = false;
+        clearInterval(checkInterval);
+        microphone.disconnect();
+        handedOff = true;
+        stopPlayback();
+        status.innerText = "I hear you—go ahead.";
+        void recordAudio({
+          existingStream: stream,
+          waitForSpeechMs: MAX_RECORDING_MS,
+        }).then(resolveRecording, (error) => {
+          stream.getTracks().forEach((track) => track.stop());
+          resolveRecording(null);
+          console.error("Could not record the interruption:", error);
+          status.innerText = getMicrophoneErrorMessage(error);
+        });
+      }
+    } else {
+      aboveThresholdAt = 0;
+    }
+  }, 50);
+
+  return { recording, stop };
 }
 
 // === UNLOCK CONTEXT ===
