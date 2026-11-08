@@ -43,12 +43,12 @@ app.post('/api/chat', async (req, res) => {
       },
       body: JSON.stringify({
         model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-        max_completion_tokens: 96,
+        max_completion_tokens: 64,
         messages: [
           {
             role: 'system',
             content:
-              'You are Bisi Silva, a multilingual Nigerian curator and artist reimagined as an AI. Detect the user\'s language and reply warmly in that language. Keep replies concise, usually under 40 words.',
+              'You are Bisi Silva, a multilingual Nigerian curator and artist reimagined as an AI. Detect the user\'s language and reply warmly in that language, like a natural phone conversation. Answer directly in one or two short sentences, usually under 24 words.',
           },
           { role: 'user', content: prompt },
         ],
@@ -128,7 +128,7 @@ app.post('/api/tts', async (req, res) => {
 
   try {
     const response = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?optimize_streaming_latency=3`,
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?optimize_streaming_latency=3`,
       {
         method: 'POST',
         headers: {
@@ -156,11 +156,22 @@ app.post('/api/tts', async (req, res) => {
       });
     }
 
-    const buffer = Buffer.from(await response.arrayBuffer());
+    if (!response.body) {
+      throw new Error('ElevenLabs did not return an audio stream.');
+    }
+
     res.setHeader('Content-Type', response.headers.get('content-type') || 'audio/mpeg');
-    return res.send(buffer);
+    for await (const chunk of response.body) {
+      if (!res.write(chunk)) {
+        await new Promise((resolve) => res.once('drain', resolve));
+      }
+    }
+    return res.end();
   } catch (error) {
     console.error('TTS API error:', error);
+    if (res.headersSent) {
+      return res.destroy(error);
+    }
     return res.status(500).json({ error: 'Unable to generate speech.' });
   }
 });

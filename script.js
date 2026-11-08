@@ -20,12 +20,11 @@ const MIN_SPEECH_MS = 100;
 const CHROME_AUDIO_ROUTE = /(?:Chrome|CriOS|Chromium)\//.test(navigator.userAgent)
   && !/(?:Edg|OPR)\//.test(navigator.userAgent);
 
-// === UNLOCK AUDIO CONTEXT (iOS & Android SAFE) ===
-document.addEventListener("touchstart", unlockAudioContext, { once: true });
-document.addEventListener("click", unlockAudioContext, { once: true });
-
 // === START / STOP LOGIC ===
 startBtn.addEventListener("click", async () => {
+  micWrapper.classList.remove("tap-effect");
+  void startBtn.offsetWidth;
+  micWrapper.classList.add("tap-effect");
   if (keepListening) {
     keepListening = false;
     startBtn.setAttribute("aria-pressed", "false");
@@ -46,7 +45,8 @@ startBtn.addEventListener("click", async () => {
     keepListening = false;
     startBtn.setAttribute("aria-pressed", "false");
     startBtn.setAttribute("aria-label", "Ask Bisi");
-    status.innerText = "Audio could not start. Tap to try again.";
+    const detail = err instanceof Error ? err.message : "Check your browser's audio settings and try again.";
+    status.innerText = `Audio couldn't start: ${detail}`;
     return;
   }
   let pendingRecording;
@@ -81,6 +81,7 @@ startBtn.addEventListener("click", async () => {
 
       status.innerText = `You said: "${userText}"`;
 
+      status.innerText = "Bisi is thinking…";
       const reply = await getChatResponse(userText);
       if (!keepListening) continue;
 
@@ -383,9 +384,8 @@ async function textToSpeech(text) {
       throw new Error(message);
     }
 
-    const audio = await response.blob();
-    if (!audio.size) throw new Error("The speech service returned an empty audio file.");
-    return audio;
+    if (!response.body) throw new Error("The speech service returned no audio stream.");
+    return response;
   } catch (err) {
     console.error("TTS error:", err);
     throw err instanceof Error
@@ -395,43 +395,242 @@ async function textToSpeech(text) {
 }
 
 // === PLAY AUDIO ===
-async function playAudioAwaitable(blob) {
+async function playAudioAwaitable(response) {
   await unlockAudioContext();
-  const audioBuffer = await audioCtx.decodeAudioData(await blob.arrayBuffer());
   let source;
+  let audioElement;
+  let mediaSource;
+  let streamReader;
+  let playbackStarted = false;
+  let playbackRequested = false;
+  let playbackPending = false;
+  let playbackCancelled = false;
+  let startPlayback;
   let resolveAudioFinished;
   const audioFinished = new Promise((resolve) => {
     resolveAudioFinished = resolve;
   });
 
   const stopPlayback = () => {
-    if (!source) return;
-    const activeSource = source;
-    source = undefined;
-    activeSource.onended = null;
-    activeSource.stop();
-    activeSource.disconnect();
+    playbackStarted = false;
+    if (source) {
+      const activeSource = source;
+      source = undefined;
+      activeSource.onended = null;
+      activeSource.stop();
+      activeSource.disconnect();
+    }
+    if (audioElement) {
+      playbackCancelled = true;
+      playbackPending = false;
+      audioElement.pause();
+      void streamReader?.cancel();
+    }
   };
-  const startPlayback = () => {
-    if (source || !keepListening) return;
-    void (async () => {
-      if (audioCtx.state !== "running") await audioCtx.resume();
-      if (audioCtx.state !== "running") {
-        throw new Error("iPhone audio is paused. Tap Ask Bisi to enable audio, then try again.");
-      }
-      if (!keepListening) return;
 
-      source = audioCtx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(audioCtx.destination);
-      source.onended = () => {
-        const endedSource = source;
-        source = undefined;
-        endedSource?.disconnect();
-        resolveAudioFinished("ended");
+  const startBufferedPlayback = async (audioBuffer) => {
+    if (source || !keepListening) return;
+    if (audioCtx.state !== "running") await audioCtx.resume();
+    if (audioCtx.state !== "running") {
+      throw new Error("Audio is paused. Tap Ask Bisi to enable audio, then try again.");
+    }
+    source = audioCtx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(audioCtx.destination);
+    source.onended = () => {
+      const endedSource = source;
+      source = undefined;
+      endedSource?.disconnect();
+      playbackStarted = false;
+      resolveAudioFinished("ended");
+    };
+    source.start();
+    playbackStarted = true;
+  };
+
+  const canStreamMp3 = CHROME_AUDIO_ROUTE
+    && typeof MediaSource !== "undefined"
+    && MediaSource.isTypeSupported("audio/mpeg")
+    && !/(?:iPhone|iPad|iPod)/i.test(navigator.userAgent);
+
+  if (canStreamMp3) {
+    mediaSource = new MediaSource();
+    audioElement = new Audio();
+    const objectUrl = URL.createObjectURL(mediaSource);
+    audioElement.onended = () => {
+      playbackStarted = false;
+      resolveAudioFinished("ended");
+    };
+    audioElement.onerror = () => {
+      playbackStarted = false;
+      status.innerText = "Bisi’s reply could not be played. Check your device volume and try again.";
+      keepListening = false;
+      resolveAudioFinished("error");
+    };
+    mediaSource.addEventListener("sourceopen", () => {
+      void (async () => {
+        const sourceBuffer = mediaSource.addSourceBuffer("audio/mpeg");
+        sourceBuffer.mode = "sequence";
+        const reader = response.body.getReader();
+        streamReader = reader;
+        const queuedChunks = [];
+        let streamEnded = false;
+        let receivedAudio = false;
+
+        const appendNextChunk = () => {
+          if (sourceBuffer.updating) return;
+          if (queuedChunks.length) {
+            sourceBuffer.appendBuffer(queuedChunks.shift());
+          } else if (streamEnded && mediaSource.readyState === "open") {
+            mediaSource.endOfStream();
+          }
+        };
+        sourceBuffer.addEventListener("updateend", appendNextChunk);
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value.byteLength) continue;
+          receivedAudio = true;
+          queuedChunks.push(value);
+          appendNextChunk();
+        }
+        if (!receivedAudio) {
+          throw new Error("The speech service returned an empty audio stream.");
+        }
+        streamEnded = true;
+        appendNextChunk();
+      })().catch((error) => {
+        if (playbackCancelled) return;
+        console.error("Streaming speech playback failed:", error);
+        status.innerText = "Bisi’s reply could not be played. Check your connection and try again.";
+        keepListening = false;
+        resolveAudioFinished("error");
+      });
+    }, { once: true });
+
+    startPlayback = () => {
+      playbackRequested = true;
+      if (playbackStarted || playbackPending || !keepListening || !audioElement.buffered.length) return;
+      playbackPending = true;
+      void audioElement.play().then(() => {
+        playbackPending = false;
+        playbackStarted = true;
+      }).catch((error) => {
+        playbackPending = false;
+        if (playbackCancelled) return;
+        console.error("Streaming audio playback was blocked:", error);
+        status.innerText = "Audio playback was blocked. Tap Ask Bisi and try again.";
+        keepListening = false;
+        resolveAudioFinished("error");
+      });
+    };
+
+    mediaSource.addEventListener("sourceopen", () => {
+      const waitForBuffer = () => {
+        if (playbackRequested && audioElement.buffered.length) {
+          startPlayback();
+          audioElement.removeEventListener("progress", waitForBuffer);
+        }
       };
-      source.start();
-    })().catch((error) => {
+      audioElement.addEventListener("progress", waitForBuffer);
+    }, { once: true });
+
+    audioElement.addEventListener("canplay", () => {
+      if (playbackRequested) startPlayback();
+    });
+    audioElement.src = objectUrl;
+
+    const cleanupStream = () => {
+      stopPlayback();
+      audioElement.onended = null;
+      audioElement.onerror = null;
+      audioElement.removeAttribute("src");
+      audioElement.load();
+      URL.revokeObjectURL(objectUrl);
+    };
+
+    if (CHROME_AUDIO_ROUTE) {
+      let stopInterruptionMonitor = () => {};
+      cancelActiveAudio = () => {
+        cleanupStream();
+        resolveAudioFinished("cancelled");
+        stopInterruptionMonitor();
+        stopActiveRecording?.();
+      };
+
+      let monitor;
+      try {
+        monitor = await monitorChromeInterruption(
+          stopPlayback,
+          () => Boolean(playbackStarted && keepListening),
+          () => keepListening,
+        );
+        stopInterruptionMonitor = monitor.stop;
+        const interruptionPromise = monitor.recording;
+        await monitor.ready;
+        if (!keepListening) return null;
+
+        startPlayback();
+        const outcome = await Promise.race([
+          audioFinished.then(() => ({ type: "finished" })),
+          interruptionPromise.then((recording) => ({ type: "interrupted", recording })),
+        ]);
+        if (outcome.type === "interrupted" && outcome.recording) return outcome.recording;
+        if (outcome.type === "interrupted") await audioFinished;
+        return null;
+      } catch (error) {
+        console.warn("Could not monitor for a Chrome voice interruption:", error);
+        startPlayback();
+        await audioFinished;
+        return null;
+      } finally {
+        cancelActiveAudio = undefined;
+        monitor?.stop();
+        cleanupStream();
+      }
+    }
+
+    const recordingPromise = recordAudio({
+      waitForSpeechMs: MAX_PLAYBACK_LISTEN_MS,
+      onReady: () => {
+        if (keepListening) {
+          startPlayback();
+        } else {
+          resolveAudioFinished("cancelled");
+        }
+      },
+      onSpeechStart: () => {
+        status.innerText = "I hear you—go ahead.";
+        stopPlayback();
+      },
+    });
+    cancelActiveAudio = () => {
+      cleanupStream();
+      resolveAudioFinished("cancelled");
+      stopActiveRecording?.();
+    };
+    try {
+      const outcome = await Promise.race([
+        recordingPromise.then((recording) => ({ type: "recording", recording })),
+        audioFinished.then((type) => ({ type })),
+      ]);
+      if (outcome.type !== "recording") {
+        stopActiveRecording?.();
+        await recordingPromise;
+        return null;
+      }
+      return outcome.recording.heardSpeech ? outcome.recording : null;
+    } finally {
+      cancelActiveAudio = undefined;
+      cleanupStream();
+    }
+  }
+
+  const audioBuffer = await audioCtx.decodeAudioData(await response.blob().then((blob) => blob.arrayBuffer()));
+  startPlayback = () => {
+    if (source || !keepListening) return;
+    void startBufferedPlayback(audioBuffer).catch((error) => {
       console.error("Playback error:", error);
       status.innerText = error.message || "Bisi’s reply could not be played. Check your device volume and try again.";
       keepListening = false;
@@ -529,11 +728,6 @@ async function monitorChromeInterruption(stopPlayback, isPlaying, isActive) {
       autoGainControl: true,
     },
   });
-  if (!isPlaying()) {
-    stream.getTracks().forEach((track) => track.stop());
-    return { recording: null, stop: () => {} };
-  }
-
   const analyser = audioCtx.createAnalyser();
   analyser.fftSize = 512;
   analyser.smoothingTimeConstant = 0.75;
@@ -621,8 +815,15 @@ async function monitorChromeInterruption(stopPlayback, isPlaying, isActive) {
 
 // === UNLOCK CONTEXT ===
 async function unlockAudioContext() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const resumePromise = audioCtx.state === "suspended" ? audioCtx.resume() : Promise.resolve();
+  const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextConstructor) {
+    throw new Error("This browser does not support audio playback. Try the latest Safari or Chrome.");
+  }
+  if (!audioCtx || audioCtx.state === "closed") {
+    audioCtx = new AudioContextConstructor();
+    audioContextPrimed = false;
+  }
+  const resumePromise = audioCtx.state !== "running" ? audioCtx.resume() : Promise.resolve();
   if (!audioContextPrimed) {
     const silentSource = audioCtx.createBufferSource();
     silentSource.buffer = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
@@ -631,8 +832,13 @@ async function unlockAudioContext() {
     silentSource.start();
     audioContextPrimed = true;
   }
-  await resumePromise;
+  try {
+    await resumePromise;
+  } catch (error) {
+    console.error("The browser rejected the audio-context resume:", error);
+    throw new Error("Your browser blocked audio playback. Check the device's audio output, then tap Ask Bisi to try again.");
+  }
   if (audioCtx.state !== "running") {
-    throw new Error("Audio is unavailable. Check your iPhone’s silent mode, output route, and Safari permissions.");
+    throw new Error(`The browser's audio is ${audioCtx.state}. Check the device's audio output, then tap Ask Bisi to try again.`);
   }
 }
