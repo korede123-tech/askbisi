@@ -19,6 +19,8 @@ const END_OF_SPEECH_SILENCE_MS = 600;
 const MIN_SPEECH_MS = 100;
 const CHROME_AUDIO_ROUTE = /(?:Chrome|CriOS|Chromium)\//.test(navigator.userAgent)
   && !/(?:Edg|OPR)\//.test(navigator.userAgent);
+const IOS_AUDIO_ROUTE = /(?:iPhone|iPad|iPod)/i.test(navigator.userAgent)
+  || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 
 // === START / STOP LOGIC ===
 startBtn.addEventListener("click", async () => {
@@ -637,6 +639,22 @@ async function playAudioAwaitable(response) {
       resolveAudioFinished("error");
     });
   };
+
+  if (IOS_AUDIO_ROUTE) {
+    // Keep the iPhone microphone closed during speaker playback to avoid audio-session distortion.
+    cancelActiveAudio = () => {
+      stopPlayback();
+      resolveAudioFinished("cancelled");
+    };
+    try {
+      startPlayback();
+      await audioFinished;
+      return null;
+    } finally {
+      cancelActiveAudio = undefined;
+      stopPlayback();
+    }
+  }
 
   // Monitor Chrome's mic without recording until the user actually interrupts.
   if (CHROME_AUDIO_ROUTE) {
