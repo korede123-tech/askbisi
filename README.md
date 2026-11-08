@@ -19,6 +19,7 @@ npm run dev           # or npm start
    - `ELEVENLABS_API_KEY`
    - `ELEVENLABS_VOICE_ID` (defaults to the configured voice ID)
    - `ELEVENLABS_TTS_MODEL` (optional; defaults to the faster `eleven_flash_v2_5`)
+   - `ELEVENLABS_TRANSCRIPTION_LANGUAGE_CODE` (optional; defaults to `eng` for English recognition)
    - `OPENAI_MODEL` (optional; defaults to `gpt-4o-mini`)
 3. Redeploy after saving the environment variables.
 
@@ -34,4 +35,7 @@ the local-network development server is not a suitable iPhone test URL.
 
 The browser selects a recording format supported by the device (MP4 on Safari
 when available) and sends it to the existing transcription endpoint. LiveKit
-environment variables are not used by this restored version.
+environment variables are not used by this restored version. Speech recognition
+is configured for English by default; change `ELEVENLABS_TRANSCRIPTION_LANGUAGE_CODE`
+to another ISO-639-1 or ISO-639-3 code if needed. Bisi replies in English unless
+you clearly ask for another language.

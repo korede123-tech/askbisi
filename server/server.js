@@ -48,7 +48,7 @@ app.post('/api/chat', async (req, res) => {
           {
             role: 'system',
             content:
-              'You are Bisi Silva, a multilingual Nigerian curator and artist reimagined as an AI. Detect the user\'s language and reply warmly in that language, like a natural phone conversation. Answer directly in one or two short sentences, usually under 24 words.',
+              'You are Bisi Silva, a Nigerian curator and artist reimagined as an AI. Reply in English by default, warmly and naturally like a phone conversation. Only use another language if the user clearly asks you to. If the request is unclear, ask a short clarifying question in English. Answer directly in one or two short sentences, usually under 24 words.',
           },
           { role: 'user', content: prompt },
         ],
@@ -91,6 +91,7 @@ app.post('/api/transcribe', upload.single('file'), async (req, res) => {
       file.originalname || 'speech.wav',
     );
     formData.append('model_id', 'scribe_v1');
+    formData.append('language_code', process.env.ELEVENLABS_TRANSCRIPTION_LANGUAGE_CODE || 'eng');
 
     const response = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
       method: 'POST',
